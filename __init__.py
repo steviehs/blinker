@@ -1,3 +1,4 @@
+import sys
 import leds
 import display
 import vibra
@@ -5,30 +6,45 @@ import utime
 import buttons
 import color
 import bhi160
+sys.path.append("/apps/blinker/")
+import ThreeAxisBuffer
 
+# some constants DO NOT CHANGE
+GT = 1  # greater than >
+LT = 0  # less than <
+DC = -1  # don't care
 
-class SumBuffer:
-    def __init__(self, size_max, filter_max = 300):
-        self.max = size_max
-        self.data = []
-        self.cur = 0
-        self.filter_max = filter_max
-        for i in range(1,size_max+1):
-            self.data.append(0)
-            
-    def append(self,x):
-        if x >= self.filter_max:
-            x = 0
-        self.data[self.cur] = x
-        self.cur = (self.cur+1) % self.max
-
-    def getsum(self):
-        """ Return a list of elements from the oldest to the newest. """
-        return sum(self.data)
-
-
-act_duration = 5000  # should stay on for 5 seconds
+# play with parameters here (could go also to json)
+sumtime = 600 # time in ms to sum up
+looptime = 10 # time in ms to wait in the recognition loop
 blink_duration = 750 # time for on or off
+act_duration = 4 * blink_duration  # should stay on for 5 seconds
+
+# the more mathematical parameters
+gyro_x_max = 200 # do not record values beyond that (in + and -)
+gyro_y_max = gyro_x_max
+gyro_z_max = gyro_x_max
+
+accel_x_max = 2 # do not record values beyond that (in + and -)
+accel_y_max = accel_x_max
+accel_z_max = accel_x_max
+
+# the comparison parameters (play with the output to find out)
+gyro_x_comp = LT  # the comparator (see below)
+gyro_x_trig = -270  # the trigger value
+gyro_y_comp = DC  # the comparator (see below)
+gyro_y_trig = 0  # the trigger value
+gyro_z_comp = DC  # the comparator (see below)
+gyro_z_trig = 0  # the trigger value
+
+accel_x_comp = DC
+accel_x_trig = 0
+accel_y_comp = GT
+accel_y_trig = 7
+accel_z_comp = DC
+accel_z_trig = 0
+
+# internal variables - do not change
 start_time = 0
 led_on = False
 led_time = 0
@@ -36,17 +52,20 @@ blink_on = False
 leds.set_powersave(eco=True)
 disp = display.open()
 pressed = buttons.read(buttons.TOP_RIGHT)
-gyro = bhi160.BHI160Gyroscope(sample_rate=10)
-accel = bhi160.BHI160Accelerometer(sample_rate=10)
+gyrodev = bhi160.BHI160Gyroscope(sample_rate=10)
+acceldev = bhi160.BHI160Accelerometer(sample_rate=10)
+gyro_str_format = "% 6d"
+accel_str_format = "% 6.1f"
+gyro_str = ""
+accel_str = ""
+act_gyro_str = ""
+act_accel_str = ""
 
+bufferdepth = int(sumtime / looptime)
+gyro = ThreeAxisBuffer.ThreeAxisBuffer(bufferdepth,gyro_x_max, gyro_y_max, gyro_z_max)
+accel = ThreeAxisBuffer.ThreeAxisBuffer(bufferdepth,accel_x_max, accel_y_max, accel_z_max)
 
-gyro_x = SumBuffer(10,200)
-gyro_y = SumBuffer(10,200)
-gyro_z = SumBuffer(10,200)
-accel_x = SumBuffer(10,200)
-accel_y = SumBuffer(10,200)
-accel_z = SumBuffer(10,200)
-
+null_sample = ThreeAxisBuffer.ThreeAxis(0,0,0)
 
 def leds_on():
     vibra.vibrate(60)
@@ -54,38 +73,39 @@ def leds_on():
     disp.backlight(100)
     disp.clear(color.YELLOW)
     disp.update()
-    
+
+
 def leds_off():
     leds.set_all([[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]])
     disp.clear(color.BLACK)
     disp.update()
-    
+
+
+# this is the main loop
 while True:
-    gyro_samples = gyro.read()
+    utime.sleep_ms(looptime)
+    gyro_samples = gyrodev.read()
     if not gyro_samples:
-        gyro_x.append(0)
-        gyro_y.append(0)
-        gyro_z.append(0)
+        gyro.append(null_sample)
     else:
         gyro_sample = gyro_samples[-1]
-        gyro_x.append(gyro_sample.x)
-        gyro_y.append(gyro_sample.y)
-        gyro_z.append(gyro_sample.z)
+        gyro.append(gyro_sample)
 
-    accel_samples = accel.read()
+    accel_samples = acceldev.read()
     if not accel_samples:
-        accel_x.append(0)
-        accel_y.append(0)
-        accel_z.append(0)
+        accel.append(null_sample)
     else:
         accel_sample = accel_samples[-1]
-        accel_x.append(accel_sample.x)
-        accel_y.append(accel_sample.y)
-        accel_z.append(accel_sample.z)
+        accel.append(accel_sample)
 
-    print(gyro_x.getsum(),gyro_y.getsum(),gyro_z.getsum(), accel_x.getsum(), accel_y.getsum(), accel_z.getsum())
-    if gyro_x.getsum() < -500 and gyro_y.getsum() < -300 and accel_x.getsum() < -3:
+    gyro_str = gyro.getstr(gyro_str_format)
+    accel_str = accel.getstr(accel_str_format)
+    print(gyro_str,accel_str)
+    if gyro.compare_sum(gyro_x_comp, gyro_x_trig, gyro_y_comp, gyro_y_trig, gyro_z_comp, gyro_z_trig) \
+            and accel.compare_sum(accel_x_comp, accel_x_trig,accel_y_comp, accel_y_trig,accel_z_comp, accel_z_trig):
         # ok we could have an activation
+        act_gyro_str = gyro_str
+        act_accel_str = accel_str
         start_time = utime.ticks_ms()
         led_time = start_time
         print("Blink activated")
@@ -108,8 +128,18 @@ while True:
                     leds_on()
                     led_on = True
     else:
-        if led_on:
-            leds_off()
-        blink_on = False
-    utime.sleep_ms(10)
+        if blink_on:
+            if led_on:
+                leds_off()
+            # now display the last activation vector
+            if act_gyro_str != "":
+                disp.print(act_gyro_str[0:6],fg=color.YELLOW,font=display.FONT16,posx=2,posy=2)
+                disp.print(act_gyro_str[7:13],fg=color.YELLOW,font=display.FONT16,posx=2,posy=24)
+                disp.print(act_gyro_str[14:20],fg=color.YELLOW,font=display.FONT16,posx=2,posy=46)
+            if act_accel_str != "":
+                disp.print(act_accel_str[0:6],fg=color.RED, font=display.FONT16,posx=85,posy=2)
+                disp.print(act_accel_str[7:13],fg=color.RED, font=display.FONT16,posx=85,posy=24)
+                disp.print(act_accel_str[14:20],fg=color.RED, font=display.FONT16,posx=85,posy=46)
+            disp.update()
+            blink_on = False
 
